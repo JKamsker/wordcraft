@@ -35,6 +35,9 @@ use std::rc::Rc;
 use craft_web_host::web::{FileData, Host, Message};
 use wordcraft_ui_egui::{Inbox, Services, WordApp};
 
+// The longest user name taken from `?author=`, as from the server's signed-in user.
+use crate::server::MAX_AUTHOR_CHARS;
+
 /// The app id in the host messages (`wordcraft:ready`).
 const APP: &str = "wordcraft";
 
@@ -43,9 +46,6 @@ const DEFAULT_NAME: &str = "Document.docx";
 
 /// The largest document taken from the host page, refused before it is copied.
 const MAX_OPEN_BYTES: u64 = 512 << 20;
-
-/// The longest user name taken from `?author=`.
-const MAX_AUTHOR_CHARS: usize = 200;
 
 #[derive(Clone)]
 pub struct Bridge {

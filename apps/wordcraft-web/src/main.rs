@@ -16,7 +16,11 @@
 //! Server storage (`server`): served by `wordcraft-server` at `<base>/app/`, `?file=<path>` opens
 //! a stored document and `?new=<path>` starts a blank one; Save, Save As and the exports store
 //! into that document's folder on the server (`PUT ../api/files/<path>`) instead of downloading.
-//! It is off while a host bridge is active.
+//! It is off while a host bridge is active. With the server's sign-in (OpenID Connect or basic),
+//! the signed-in user (`GET ../api/me`) names the author of comments and tracked changes for the
+//! visit, and an expired sign-in (401) says to sign in again in a new tab before saving, leaving
+//! the document unsaved; opening a document before signing in goes to the server's sign-in page
+//! and back.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(any(target_arch = "wasm32", test))]

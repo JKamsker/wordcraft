@@ -83,6 +83,7 @@ pub fn start() {
                     let mut session = Session::new(doc);
                     session.system_region = region;
                     let messages = Rc::new(RefCell::new(server_error.into_iter().collect::<Vec<_>>()));
+                    let open_dirty = dirty.clone();
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
@@ -109,9 +110,12 @@ pub fn start() {
                     if !sample && server.is_none() {
                         app.start_screen();
                     }
+                    // The server's signed-in user, once it has said who that is (`WebShell::logic`).
+                    let signed_in = Rc::new(RefCell::new(None));
                     if let Some(server) = &server {
                         server.prepare(&mut app);
-                        server.open(inbox.clone(), cc.egui_ctx.clone(), messages.clone());
+                        server.check_sign_in(signed_in.clone(), messages.clone(), cc.egui_ctx.clone());
+                        server.open(inbox.clone(), cc.egui_ctx.clone(), messages.clone(), open_dirty);
                     }
                     // The host's name for the user signs this visit's work, but isn't stored as the
                     // browser's own preference, which a visit outside the host would restore.
@@ -122,7 +126,7 @@ pub fn start() {
                         crate::host::Bridge::set_author(&mut app, &author);
                         prefs.keep_own_author(&app.session.author, &own);
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs }))
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, signed_in }))
                 }),
             )
             .await;
@@ -157,6 +161,8 @@ struct WebShell {
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
     prefs: crate::prefs::PrefsSync,
+    /// Server storage: the signed-in user's name, until it signs this visit's work.
+    signed_in: Rc<RefCell<Option<String>>>,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -174,6 +180,14 @@ impl eframe::App for WebShell {
     /// preferences to browser storage immediately, because a reload or closed tab never runs the
     /// exit path.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The server's signed-in user signs this visit's comments and tracked changes, as a host
+        // page's `?author=` does, without becoming the browser's own stored name.
+        let signed_in = self.signed_in.borrow_mut().take();
+        if let Some(name) = signed_in {
+            let own = self.app.session.author.clone();
+            crate::host::Bridge::set_author(&mut self.app, &name);
+            self.prefs.keep_own_author(&self.app.session.author, &own);
+        }
         self.app.logic(ctx);
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
         for msg in msgs {
