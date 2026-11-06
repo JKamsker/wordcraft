@@ -18,14 +18,21 @@ async-trait = "0.1"
 base64 = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "form", "multipart", "json"] }
 chrono = { workspace = true, features = ["serde", "clock"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 log = { workspace = true }
 percent-encoding = "2"
+# S3, Azure Blob and GCS. The cloud features pull in aws-lc-rs, so take the `*-base` features and pick
+# the `ring` crypto provider; reqwest and rustls below are configured the same way.
+object_store = { version = "0.14", default-features = false, features = ["aws-base", "azure-base", "gcp-base", "ring", "reqwest"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal", "io-util", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

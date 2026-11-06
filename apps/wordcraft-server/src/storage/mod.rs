@@ -67,7 +67,7 @@ pub type SharedStorage = Arc<dyn Storage>;
 pub fn open(url: &str) -> Result<SharedStorage, StorageError> {
     let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
     match scheme.as_deref() {
-        Some("s3" | "az" | "azure" | "abfs" | "gs") => object::open(url),
+        Some("s3" | "az" | "azure" | "abfs" | "abfss" | "gs") => object::open(url),
         Some("ftp" | "ftps") => ftp::open(url),
         Some("smb") => smb::open(url),
         Some("dir" | "file") => local::open(url.split_once("://").map(|(_, p)| p).unwrap_or(url)),
