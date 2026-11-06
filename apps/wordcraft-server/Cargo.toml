@@ -1,0 +1,28 @@
+[package]
+name = "wordcraft-server"
+description = "Serves WordCraft for the web and stores documents (directory, S3, Azure Blob, GCS, FTP, SMB)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "wordcraft-server"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "form", "multipart", "json"] }
+chrono = { workspace = true, features = ["serde", "clock"] }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal", "io-util", "sync"] }
+tower-http = { version = "0.6", features = ["fs"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
