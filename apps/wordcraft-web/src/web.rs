@@ -35,6 +35,16 @@ pub fn start() {
         // on the canvas (`host`). The host guards leaving the page, so this one doesn't.
         let bridge = crate::host::Bridge::detect(&canvas);
         let app_bridge = bridge.clone();
+        // Server storage (`server`): `?file=` / `?new=` without a host bridge open from and save
+        // to `wordcraft-server`. A path it would refuse leaves the normal app, with a message.
+        let (server, server_error) = match bridge.is_none().then(|| crate::server::Server::detect(query_param)).flatten() {
+            Some(Ok(server)) => (Some(server), None),
+            Some(Err(e)) => {
+                log::error!("server storage is off: {e}");
+                (None, Some(format!("Server storage is off: {e}")))
+            }
+            None => (None, None),
+        };
         let dirty = Rc::new(Cell::new(false));
         let saves = AsyncSaves::default();
         if bridge.is_none()
@@ -66,15 +76,19 @@ pub fn start() {
                     // The browser's locale picks the new document's paper, the units and the
                     // decimal separator (#838).
                     let region = wordcraft_ui_egui::i18n::system_region();
-                    // In host mode the parent sends the document to edit; no sample meanwhile.
-                    let sample = app_bridge.is_none() && query().contains("sample");
+                    // In host mode the parent sends the document to edit, and the server's document
+                    // comes from the server; no sample meanwhile.
+                    let sample = app_bridge.is_none() && server.is_none() && query().contains("sample");
                     let doc = if sample { wordcraft_engine::sample::sample_document() } else { wordcraft_engine::blank_document(&region) };
                     let mut session = Session::new(doc);
                     session.system_region = region;
-                    let messages = Rc::new(RefCell::new(Vec::new()));
+                    let messages = Rc::new(RefCell::new(server_error.into_iter().collect::<Vec<_>>()));
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone(), dirty, saves.clone(), messages.clone());
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
+                    }
+                    if let Some(server) = &server {
+                        server.connect(&mut services, saves.clone(), messages.clone(), cc.egui_ctx.clone());
                     }
                     let mut app = WordApp::new(session, services);
                     // Pasted pictures wait apart from dropped files: the app inserts one only when the page is the edit target (#1349).
@@ -91,8 +105,13 @@ pub fn start() {
                     }
                     let mut prefs = crate::prefs::PrefsSync::new(stored);
                     // No document to show: start on File › Home, as the desktop app does (#766).
-                    if !sample {
+                    // The server's document is on its way, or the new one is the document.
+                    if !sample && server.is_none() {
                         app.start_screen();
+                    }
+                    if let Some(server) = &server {
+                        server.prepare(&mut app);
+                        server.open(inbox.clone(), cc.egui_ctx.clone(), messages.clone());
                     }
                     // The host's name for the user signs this visit's work, but isn't stored as the
                     // browser's own preference, which a visit outside the host would restore.
@@ -150,15 +169,16 @@ fn stored_prefs() -> Option<String> {
 }
 
 impl eframe::App for WebShell {
-    /// Runs one browser frame: forwards queued host messages to the status bar, advances the app,
-    /// then writes changed preferences to browser storage immediately, because a reload or closed
-    /// tab never runs the exit path.
+    /// Runs one browser frame: advances the app, forwards queued page messages to the status bar
+    /// (after the app, so a server save's own report is the one shown), then writes changed
+    /// preferences to browser storage immediately, because a reload or closed tab never runs the
+    /// exit path.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.app.logic(ctx);
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
         for msg in msgs {
             self.app.status(msg);
         }
-        self.app.logic(ctx);
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {
@@ -651,7 +671,7 @@ fn print_pdf(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn mime_for(name: &str) -> &'static str {
+pub(crate) fn mime_for(name: &str) -> &'static str {
     match name.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",

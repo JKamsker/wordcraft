@@ -13,12 +13,18 @@
 //! its own document (no iframe) with `data-host="page"` on the canvas, talking over DOM
 //! `CustomEvent`s on the canvas. `&author=` names the user for comments and tracked changes in
 //! either host mode.
+//! Server storage (`server`): served by `wordcraft-server` at `<base>/app/`, `?file=<path>` opens
+//! a stored document and `?new=<path>` starts a blank one; Save, Save As and the exports store
+//! into that document's folder on the server (`PUT ../api/files/<path>`) instead of downloading.
+//! It is off while a host bridge is active.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(any(target_arch = "wasm32", test))]
 mod prefs;
 #[cfg(any(target_arch = "wasm32", test))]
 mod save_fallback;
+#[cfg(any(target_arch = "wasm32", test))]
+mod server;
 
 #[cfg(target_arch = "wasm32")]
 mod host;
