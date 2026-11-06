@@ -26,6 +26,12 @@ impl BasicAuth {
         Self { expected: user_password.as_bytes().to_vec() }
     }
 
+    /// The expected user name (the part before the first `:`).
+    pub fn user(&self) -> String {
+        let user = self.expected.split(|b| *b == b':').next().unwrap_or_default();
+        String::from_utf8_lossy(user).into_owned()
+    }
+
     /// Whether an `Authorization` header value carries the expected credentials.
     pub fn accepts(&self, header: Option<&[u8]>) -> bool {
         let Some(header) = header else { return false };
@@ -68,5 +74,6 @@ mod tests {
         assert!(!auth.accepts(Some(&vec![b'a'; MAX_HEADER_BYTES + 1])));
         assert!(!auth.accepts(None));
         assert!(!format!("{auth:?}").contains("s3cret"));
+        assert_eq!(auth.user(), "ann");
     }
 }

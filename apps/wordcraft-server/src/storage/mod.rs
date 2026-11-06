@@ -9,6 +9,7 @@ pub mod local;
 pub mod memory;
 pub mod object;
 pub mod path;
+pub mod scoped;
 pub mod smb;
 
 use std::sync::Arc;

@@ -78,6 +78,7 @@ td.actions{white-space:nowrap}
 td.actions form{display:inline}
 .empty{color:var(--muted);padding:12px 0}
 .error{color:var(--danger)}
+form.who{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 code{background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
 ";
 
@@ -89,11 +90,19 @@ fn page(title: &str, body: &str) -> String {
     )
 }
 
-/// The file browser. `files` may be an error message when the listing failed.
-pub fn browser(storage: &str, files: Result<&[Entry], &str>) -> String {
+/// The file browser. `files` may be an error message when the listing failed; `signed_in` is the
+/// user's name with OpenID Connect sign-in (it adds a Sign out button).
+pub fn browser(storage: &str, files: Result<&[Entry], &str>, signed_in: Option<&str>) -> String {
     let mut body = String::new();
     body.push_str("<h1>WordCraft documents</h1>");
     body.push_str(&format!("<p class=\"sub\">Storage: {}</p>", escape(storage)));
+    if let Some(name) = signed_in {
+        body.push_str(&format!(
+            "<form class=\"sub who\" method=\"post\" action=\"auth/logout\">Signed in as <strong>{}</strong> \
+             <button type=\"submit\" class=\"ghost\">Sign out</button></form>",
+            escape(name)
+        ));
+    }
     body.push_str(
         "<div class=\"card forms\">\
          <form method=\"get\" action=\"app/\"><label for=\"new\">New document</label>\
@@ -137,6 +146,16 @@ pub fn browser(storage: &str, files: Result<&[Entry], &str>) -> String {
     }
     body.push_str("</div>");
     page("WordCraft documents", &body)
+}
+
+/// A short message page (sign-in errors), with an optional link (`(text, href)`).
+pub fn notice(title: &str, message: &str, link: Option<(&str, &str)>) -> String {
+    let mut body = format!("<h1>{}</h1><div class=\"card\"><p>{}</p>", escape(title), escape(message));
+    if let Some((text, href)) = link {
+        body.push_str(&format!("<p><a class=\"btn ghost\" href=\"{}\">{}</a></p>", escape(href), escape(text)));
+    }
+    body.push_str("</div>");
+    page(title, &body)
 }
 
 /// Shown at `/app/` when the web root has no `index.html`.

@@ -6,6 +6,7 @@ mod auth;
 mod config;
 mod html;
 mod http;
+mod oidc;
 mod storage;
 
 use std::process::ExitCode;
@@ -78,8 +79,12 @@ async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> ExitCode {
     init_logging();
+    // reqwest and the TLS backends are built without a bundled crypto provider; use ring for every
+    // TLS client in the process (OpenID Connect and the cloud backends). An error means one is
+    // already installed, which is fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let config = match config::parse(std::env::args().skip(1), |k| std::env::var(k).ok()) {
-        Ok(Command::Run(c)) => c,
+        Ok(Command::Run(c)) => *c,
         Ok(Command::Help) => {
             print!("{}", config::USAGE);
             return ExitCode::SUCCESS;
@@ -88,6 +93,25 @@ async fn main() -> ExitCode {
             eprintln!("wordcraft-server: {e}");
             return ExitCode::from(2);
         }
+    };
+    let oidc = match config.oidc.clone() {
+        Some(c) => {
+            let public = c.public_url.clone();
+            match oidc::Oidc::discover(c).await {
+                Ok(o) => {
+                    log::info!("OpenID Connect sign-in with {} (redirect URI {})", o.issuer(), o.redirect_uri());
+                    if public.scheme() != "https" && !config::is_loopback_http(&public) {
+                        log::warn!("--public-url is not https: session cookies are not Secure and travel unencrypted");
+                    }
+                    Some(std::sync::Arc::new(o))
+                }
+                Err(e) => {
+                    eprintln!("wordcraft-server: OpenID Connect: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => None,
     };
     let storage = match storage::open(&config.storage) {
         Ok(s) => s,
@@ -108,8 +132,8 @@ async fn main() -> ExitCode {
     if !config.web_root.join("index.html").is_file() {
         log::warn!("no index.html in {}: build the web app with `trunk build --release` in apps/wordcraft-web", config.web_root.display());
     }
-    if config.auth.is_none() && !addr.ip().is_loopback() {
-        log::warn!("listening on {addr} without --auth: anyone who can reach it can read and change the documents");
+    if config.auth.is_none() && oidc.is_none() && !addr.ip().is_loopback() {
+        log::warn!("listening on {addr} without --auth or --oidc-issuer: anyone who can reach it can read and change the documents");
     }
     log::info!("WordCraft server on http://{addr}/ (web app at http://{addr}/app/)");
     let app = http::router(http::AppState {
@@ -117,6 +141,7 @@ async fn main() -> ExitCode {
         max_bytes: config.max_bytes,
         web_root: config.web_root,
         auth: config.auth.as_deref().map(auth::BasicAuth::new),
+        oidc,
     });
     if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await {
         log::error!("server error: {e}");

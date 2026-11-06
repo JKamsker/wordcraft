@@ -11,6 +11,11 @@
 //! | `GET /api/files/{path}` | the bytes (`application/octet-stream`), 404 when missing |
 //! | `PUT /api/files/{path}` | stores the raw body; 204 |
 //! | `DELETE /api/files/{path}` | removes the file; 204 |
+//! | `GET /api/me` | `{"mode": "oidc"\|"basic"\|"none", "authenticated", "user": {"id", "name", "email", "groups"}\|null, "logout": "auth/logout"\|null}` |
+//! | `GET /auth/login`, `GET /auth/callback`, `POST /auth/logout` | OpenID Connect sign-in (see `oidc`) |
+//!
+//! With OpenID Connect, every route but `/auth/*` needs a session or a bearer token: the API answers
+//! 401 `{"error": "unauthenticated", "login": "auth/login"}` and pages redirect to the sign-in.
 //!
 //! Errors: invalid path 400, missing 404, too large 413, storage failure 502 (detail logged, not
 //! returned). Every response carries `X-Content-Type-Options: nosniff`. Writes from another site
@@ -22,7 +27,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Form, Multipart, Path, Request, State};
+use axum::extract::{DefaultBodyLimit, Form, FromRequestParts, Multipart, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -32,6 +37,8 @@ use tower_http::services::ServeDir;
 
 use crate::auth::BasicAuth;
 use crate::html;
+use crate::oidc::{self, Oidc, User};
+use crate::storage::scoped::ScopedStorage;
 use crate::storage::{DocPath, SharedStorage, StorageError};
 
 /// What every handler shares.
@@ -42,9 +49,38 @@ pub struct AppState {
     /// The web build served at `/app/`.
     pub web_root: PathBuf,
     pub auth: Option<BasicAuth>,
+    /// OpenID Connect sign-in (never together with `auth`).
+    pub oidc: Option<Arc<Oidc>>,
 }
 
 type Shared = Arc<AppState>;
+
+/// Who made a request, set by [`guard`].
+#[derive(Clone)]
+enum Identity {
+    Basic(String),
+    Oidc(Arc<User>),
+}
+
+/// The storage a request may use: the user's own folder with `--per-user-storage`.
+#[derive(Clone)]
+struct RequestStorage(SharedStorage);
+
+/// Extracts the request's storage. With per-user storage and no folder chosen by [`guard`], it
+/// refuses the request rather than fall back to everyone's files.
+struct Docs(SharedStorage);
+
+impl FromRequestParts<Shared> for Docs {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, state: &Shared) -> Result<Self, Self::Rejection> {
+        match parts.extensions.get::<RequestStorage>() {
+            Some(s) => Ok(Docs(s.0.clone())),
+            None if state.oidc.as_ref().is_some_and(|o| o.per_user_storage()) => Err(StatusCode::UNAUTHORIZED.into_response()),
+            None => Ok(Docs(state.storage.clone())),
+        }
+    }
+}
 
 /// The browser page's policy: no scripts, no external anything, forms only to this server.
 const BROWSER_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
@@ -62,22 +98,47 @@ pub fn router(state: AppState) -> Router {
         .route("/app/{*rest}", get(app_static))
         .route("/api/files", get(list_files))
         .route("/api/files/{*path}", get(get_file).put(put_file).delete(delete_file))
+        .route("/api/me", get(me))
+        .route("/auth/login", get(auth_login))
+        .route("/auth/callback", get(auth_callback))
+        .route("/auth/logout", post(auth_logout))
         .layer(DefaultBodyLimit::max(limit))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
 
 /// Auth, cross-site write refusal and the `nosniff` header, around every route.
-async fn guard(State(state): State<Shared>, req: Request, next: Next) -> Response {
-    let mut resp = if let Some(auth) = &state.auth
-        && !auth.accepts(req.headers().get(header::AUTHORIZATION).map(HeaderValue::as_bytes))
-    {
-        let mut r = (StatusCode::UNAUTHORIZED, "authentication required\n").into_response();
-        r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Basic realm=\"WordCraft\", charset=\"UTF-8\""));
-        r
-    } else if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) && is_cross_site(req.headers()) {
-        (StatusCode::FORBIDDEN, "cross-site requests may not change documents\n").into_response()
-    } else {
+async fn guard(State(state): State<Shared>, mut req: Request, next: Next) -> Response {
+    let mut resp = 'resp: {
+        if let Some(auth) = &state.auth {
+            if !auth.accepts(req.headers().get(header::AUTHORIZATION).map(HeaderValue::as_bytes)) {
+                let mut r = (StatusCode::UNAUTHORIZED, "authentication required\n").into_response();
+                r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Basic realm=\"WordCraft\", charset=\"UTF-8\""));
+                break 'resp r;
+            }
+            req.extensions_mut().insert(Identity::Basic(auth.user()));
+        }
+        // The sign-in routes are open; everything else needs a session or a bearer token.
+        if let Some(oidc) = &state.oidc
+            && !req.uri().path().starts_with("/auth/")
+        {
+            let Some(user) = oidc.authenticate(req.headers()).await else {
+                break 'resp oidc::unauthenticated(req.method(), req.uri());
+            };
+            if oidc.per_user_storage() {
+                match ScopedStorage::new(state.storage.clone(), &user.folder()) {
+                    Ok(s) => req.extensions_mut().insert(RequestStorage(Arc::new(s))),
+                    Err(e) => {
+                        log::error!("per-user storage: {e}");
+                        break 'resp StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                };
+            }
+            req.extensions_mut().insert(Identity::Oidc(user));
+        }
+        if !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) && is_cross_site(req.headers()) {
+            break 'resp (StatusCode::FORBIDDEN, "cross-site requests may not change documents\n").into_response();
+        }
         next.run(req).await
     };
     resp.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -116,15 +177,15 @@ fn doc_path(raw: &str) -> Result<DocPath, ApiError> {
     Ok(DocPath::parse(raw)?)
 }
 
-async fn sorted_list(state: &AppState) -> Result<Vec<crate::storage::Entry>, StorageError> {
-    let mut files = state.storage.list().await?;
+async fn sorted_list(storage: &SharedStorage) -> Result<Vec<crate::storage::Entry>, StorageError> {
+    let mut files = storage.list().await?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
 }
 
-async fn list_files(State(state): State<Shared>) -> Result<Response, ApiError> {
-    let files = sorted_list(&state).await?;
-    let body = serde_json::json!({ "storage": state.storage.describe(), "files": files });
+async fn list_files(Docs(storage): Docs) -> Result<Response, ApiError> {
+    let files = sorted_list(&storage).await?;
+    let body = serde_json::json!({ "storage": storage.describe(), "files": files });
     Ok(([(header::CACHE_CONTROL, "no-store")], axum::Json(body)).into_response())
 }
 
@@ -135,9 +196,9 @@ fn content_disposition(name: &str) -> HeaderValue {
     HeaderValue::from_str(&value).unwrap_or_else(|_| HeaderValue::from_static("attachment"))
 }
 
-async fn get_file(State(state): State<Shared>, Path(raw): Path<String>) -> Result<Response, ApiError> {
+async fn get_file(State(state): State<Shared>, Docs(storage): Docs, Path(raw): Path<String>) -> Result<Response, ApiError> {
     let path = doc_path(&raw)?;
-    let bytes = state.storage.get(&path, state.max_bytes).await?;
+    let bytes = storage.get(&path, state.max_bytes).await?;
     Ok((
         [
             (header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
@@ -149,29 +210,79 @@ async fn get_file(State(state): State<Shared>, Path(raw): Path<String>) -> Resul
         .into_response())
 }
 
-async fn put_file(State(state): State<Shared>, Path(raw): Path<String>, body: Bytes) -> Result<StatusCode, ApiError> {
+async fn put_file(Docs(storage): Docs, Path(raw): Path<String>, body: Bytes) -> Result<StatusCode, ApiError> {
     let path = doc_path(&raw)?;
-    state.storage.put(&path, Vec::from(body)).await?;
+    storage.put(&path, Vec::from(body)).await?;
     log::info!("saved {}", path.as_str());
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn delete_file(State(state): State<Shared>, Path(raw): Path<String>) -> Result<StatusCode, ApiError> {
+async fn delete_file(Docs(storage): Docs, Path(raw): Path<String>) -> Result<StatusCode, ApiError> {
     let path = doc_path(&raw)?;
-    state.storage.delete(&path).await?;
+    storage.delete(&path).await?;
     log::info!("deleted {path}");
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn browser(State(state): State<Shared>) -> Response {
-    let (status, page) = match sorted_list(&state).await {
-        Ok(files) => (StatusCode::OK, html::browser(&state.storage.describe(), Ok(&files))),
+async fn browser(State(state): State<Shared>, Docs(storage): Docs, req: Request) -> Response {
+    let name = match req.extensions().get::<Identity>() {
+        Some(Identity::Oidc(user)) => Some(user.name.clone()),
+        _ => None,
+    };
+    let (status, page) = match sorted_list(&storage).await {
+        Ok(files) => (StatusCode::OK, html::browser(&storage.describe(), Ok(&files), name.as_deref())),
         Err(e) => {
             log::error!("listing failed: {e}");
-            (StatusCode::BAD_GATEWAY, html::browser(&state.storage.describe(), Err("the storage backend reported an error")))
+            (StatusCode::BAD_GATEWAY, html::browser(&storage.describe(), Err("the storage backend reported an error"), name.as_deref()))
         }
     };
-    (status, [(header::CONTENT_SECURITY_POLICY, BROWSER_CSP), (header::CACHE_CONTROL, "no-store")], Html(page)).into_response()
+    // Signing out redirects the form to the provider, which form-action must allow.
+    let csp = match state.oidc.as_ref().and_then(|o| o.end_session_origin()) {
+        Some(origin) => BROWSER_CSP.replace("form-action 'self'", &format!("form-action 'self' {origin}")),
+        None => BROWSER_CSP.to_string(),
+    };
+    let csp = HeaderValue::from_str(&csp).unwrap_or_else(|_| HeaderValue::from_static(BROWSER_CSP));
+    (status, [(header::CONTENT_SECURITY_POLICY, csp), (header::CACHE_CONTROL, HeaderValue::from_static("no-store"))], Html(page)).into_response()
+}
+
+/// `GET /api/me`: who is signed in, for the web app. A contract; keep the shape.
+async fn me(req: Request) -> Response {
+    let body = match req.extensions().get::<Identity>() {
+        Some(Identity::Oidc(user)) => serde_json::json!({ "mode": "oidc", "authenticated": true, "user": user.to_json(), "logout": "auth/logout" }),
+        Some(Identity::Basic(name)) => serde_json::json!({
+            "mode": "basic",
+            "authenticated": true,
+            "user": { "id": name, "name": name, "email": null, "groups": [] },
+            "logout": null,
+        }),
+        None => serde_json::json!({ "mode": "none", "authenticated": false, "user": null, "logout": null }),
+    };
+    ([(header::CACHE_CONTROL, "no-store")], axum::Json(body)).into_response()
+}
+
+fn no_oidc() -> Response {
+    (StatusCode::NOT_FOUND, "OpenID Connect sign-in is not configured\n").into_response()
+}
+
+async fn auth_login(State(state): State<Shared>, uri: Uri) -> Response {
+    match &state.oidc {
+        Some(o) => o.login(uri.query()),
+        None => no_oidc(),
+    }
+}
+
+async fn auth_callback(State(state): State<Shared>, headers: HeaderMap, uri: Uri) -> Response {
+    match &state.oidc {
+        Some(o) => o.callback(&headers, uri.query()).await,
+        None => no_oidc(),
+    }
+}
+
+async fn auth_logout(State(state): State<Shared>, headers: HeaderMap) -> Response {
+    match &state.oidc {
+        Some(o) => o.logout(&headers),
+        None => no_oidc(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -179,14 +290,14 @@ struct DeleteForm {
     path: String,
 }
 
-async fn delete_form(State(state): State<Shared>, Form(form): Form<DeleteForm>) -> Result<Redirect, ApiError> {
+async fn delete_form(Docs(storage): Docs, Form(form): Form<DeleteForm>) -> Result<Redirect, ApiError> {
     let path = doc_path(&form.path)?;
-    state.storage.delete(&path).await?;
+    storage.delete(&path).await?;
     log::info!("deleted {path}");
     Ok(Redirect::to("./"))
 }
 
-async fn upload_form(State(state): State<Shared>, mut multipart: Multipart) -> Result<Redirect, Response> {
+async fn upload_form(State(state): State<Shared>, Docs(storage): Docs, mut multipart: Multipart) -> Result<Redirect, Response> {
     let bad = |e: axum::extract::multipart::MultipartError| (e.status(), e.body_text()).into_response();
     let mut folder = String::new();
     let mut file: Option<(String, Bytes)> = None;
@@ -212,7 +323,7 @@ async fn upload_form(State(state): State<Shared>, mut multipart: Multipart) -> R
     if bytes.len() as u64 > state.max_bytes {
         return Err(ApiError(StorageError::TooLarge(path.to_string())).into_response());
     }
-    state.storage.put(&path, Vec::from(bytes)).await.map_err(|e| ApiError(e).into_response())?;
+    storage.put(&path, Vec::from(bytes)).await.map_err(|e| ApiError(e).into_response())?;
     log::info!("uploaded {path}");
     Ok(Redirect::to("./"))
 }
@@ -255,7 +366,7 @@ mod tests {
     const LIMIT: u64 = 1024;
 
     fn app_with(storage: SharedStorage, web_root: PathBuf, auth: Option<&str>) -> Router {
-        router(AppState { storage, max_bytes: LIMIT, web_root, auth: auth.map(BasicAuth::new) })
+        router(AppState { storage, max_bytes: LIMIT, web_root, auth: auth.map(BasicAuth::new), oidc: None })
     }
 
     fn app() -> Router {
@@ -354,6 +465,23 @@ mod tests {
         let with = |value: &str| Request::builder().uri("/api/files").header(header::AUTHORIZATION, value).body(Body::empty()).unwrap();
         assert_eq!(app.clone().oneshot(with(&bad)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
         assert_eq!(app.clone().oneshot(with(&good)).await.unwrap().status(), StatusCode::OK);
+        let me =
+            app.clone().oneshot(Request::builder().uri("/api/me").header(header::AUTHORIZATION, &good).body(Body::empty()).unwrap()).await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text(me).await).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"mode": "basic", "authenticated": true, "user": {"id": "ann", "name": "ann", "email": null, "groups": []}, "logout": null})
+        );
+    }
+
+    #[tokio::test]
+    async fn me_without_auth() {
+        let r = send(&app(), "GET", "/api/me", Body::empty()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&text(r).await).unwrap();
+        assert_eq!(json, serde_json::json!({"mode": "none", "authenticated": false, "user": null, "logout": null}));
+        let r = send(&app(), "GET", "/auth/login", Body::empty()).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
