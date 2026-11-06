@@ -15,14 +15,17 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
+base64 = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "form", "multipart", "json"] }
 chrono = { workspace = true, features = ["serde", "clock"] }
 log = { workspace = true }
+percent-encoding = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal", "io-util", "sync"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
