@@ -354,6 +354,18 @@ emerge --ask app-office/wordcraft-bin
 |---|---|---|
 | Static site | `wordcraft-web-<ver>.zip` | Runs in a modern browser; host it on any static server |
 
+To edit documents stored on a server, build the web app and run `wordcraft-server`, which hosts it
+and keeps the files in a folder, S3 (or MinIO), Azure Blob Storage, Google Cloud Storage, FTP/FTPS
+or an SMB share:
+
+```bash
+(cd apps/wordcraft-web && trunk build --release)
+cargo run --release -p wordcraft-server -- --storage dir://./documents --web-root dist/web
+```
+
+Open `http://127.0.0.1:8780/` for the file browser; Edit opens a document in WordCraft and Save
+writes it back. Storage URLs, credentials and the HTTP API: [apps/wordcraft-server/README.md](apps/wordcraft-server/README.md).
+
 ## The Crafting Apps
 
 WordCraft is one of the **Crafting Apps**: free, open-source creative tools from the
