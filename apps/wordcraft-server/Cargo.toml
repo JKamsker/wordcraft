@@ -26,8 +26,14 @@ percent-encoding = "2"
 object_store = { version = "0.14", default-features = false, features = ["aws-base", "azure-base", "gcp-base", "ring", "reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# System root certificates for FTPS.
+rustls-native-certs = "0.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# SMB2/3 shares (pure Rust, NTLM through sspi with ring; no Kerberos, which would pull reqwest).
+smb = { version = "0.12", default-features = false, features = ["async", "sign", "encrypt"] }
+# FTP/FTPS (explicit TLS through rustls with the ring provider; never aws-lc or native-tls).
+suppaftp = { version = "12.2", default-features = false, features = ["tokio", "tokio-rustls-ring"] }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal", "io-util", "sync"] }
 tower = { version = "0.5", features = ["util"] }
@@ -36,3 +42,6 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# An in-process FTP server for the FTP backend's round-trip test.
+libunftp = { version = "0.24", default-features = false, features = ["ring"] }
+unftp-sbe-fs = "0.4"
